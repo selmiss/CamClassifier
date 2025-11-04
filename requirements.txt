@@ -1,0 +1,11 @@
+# Computer Vision
+opencv-python>=4.8.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+open_clip_torch>=2.20.0
+
+# Image Processing
+Pillow>=10.0.0
+
