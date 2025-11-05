@@ -4,10 +4,12 @@ __pycache__/
 *$py.class
 
 pics/
+logs/
 fewshot/neg/*
 fewshot/pos/*
 local.env.sh
 logs/*
+run.sh
 # C extensions
 *.so
 

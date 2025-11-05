@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 import torch
 import torch.nn.functional as F
 import open_clip
@@ -23,8 +24,8 @@ def load_model():
     model = model.to(device).eval()
     
     # Define classes (order matters!)
-    CLASSES = ["open", "closed"]  # maps to pos, neg
-    SUPPORT_FOLDERS = ["fewshot/pos", "fewshot/neg"]  # pos=open, neg=closed
+    CLASSES = ["open", "closed", "closed_dark"]  # maps to pos, neg, neg_dark
+    SUPPORT_FOLDERS = ["fewshot/pos", "fewshot/neg", "fewshot/neg_dark"]  # pos=open, neg=closed, neg_dark=closed_dark
     
     # Compute prototypes (mean features) for each class
     prototypes = []
@@ -39,9 +40,9 @@ def load_model():
         proto = F.normalize(proto, dim=-1)  # Re-normalize for stability
         prototypes.append(proto)
     
-    prototypes = torch.cat(prototypes, dim=0)  # (C=2, D)
+    prototypes = torch.cat(prototypes, dim=0)  # (C=3, D)
     
-    return model, preprocess, prototypes, device
+    return model, preprocess, prototypes, CLASSES, device
 
 
 def main():
@@ -65,12 +66,15 @@ def main():
     
     # Load model and prepare visual prototypes from few-shot examples
     print("Loading model and computing prototypes...")
-    model, preprocess, prototypes, device = load_model()
+    model, preprocess, prototypes, classes, device = load_model()
     print(f"Model loaded successfully on device: {device}")
+    print(f"Classes: {classes}")
     
     # Monitoring loop configuration
-    check_interval = 3  # seconds between checks
+    check_interval = 5  # seconds between checks
+    model_reload_interval = 3600  # seconds (1 hour)
     start_time = time.time()
+    last_model_load_time = time.time()
     current_state = None
     iteration = 0
     
@@ -85,8 +89,27 @@ def main():
             elapsed = time.time() - start_time
             print(f"\n[Check #{iteration} @ {elapsed:.1f}s]")
             
+            # Check if it's time to reload the model (every hour)
+            time_since_last_load = time.time() - last_model_load_time
+            if time_since_last_load >= model_reload_interval:
+                print(f"  Reloading model (last loaded {time_since_last_load/60:.1f} minutes ago)...")
+                try:
+                    model, preprocess, prototypes, classes, device = load_model()
+                    last_model_load_time = time.time()
+                    print(f"  ✓ Model reloaded successfully")
+                except Exception as e:
+                    print(f"  ✗ Failed to reload model: {e}")
+                    print(f"  Continuing with existing model...")
+            
+            # Check if current time is in quiet hours (7pm to 8am)
+            current_hour = datetime.now().hour
+            if 19 <= current_hour or current_hour < 8:
+                print(f"  Quiet hours (7pm-8am) - skipping capture (current time: {datetime.now().strftime('%H:%M:%S')})")
+                time.sleep(check_interval)
+                continue
+            
             # Capture and predict
-            result, photo_path = capture_and_predict(model, preprocess, prototypes, device)
+            result, photo_path = capture_and_predict(model, preprocess, prototypes, device, classes)
             
             if not result:
                 print("Failed to capture or predict, skipping...")
@@ -94,11 +117,14 @@ def main():
                 continue
             
             # Determine current door state
-            new_state = "open" if result['open'] > result['closed'] else "closed"
-            confidence = result[new_state]
+            # Combine closed and closed_dark as "closed" state
+            closed_total = result['closed'] + result.get('closed_dark', 0)
+            new_state = "open" if result['open'] > closed_total else "closed"
+            confidence = result['open'] if new_state == "open" else closed_total
             
             print(f"  State: {new_state.upper()} (confidence: {confidence:.2%})")
-            print(f"  Open: {result['open']:.2%} | Closed: {result['closed']:.2%}")
+            prob_str = " | ".join([f"{cls.capitalize()}: {result[cls]:.2%}" for cls in classes])
+            print(f"  {prob_str}")
             
             # Check for state change FIRST (before deleting photo)
             state_changed = False
@@ -157,14 +183,21 @@ Photo attached.
             else:
                 print(f"  State unchanged: {current_state.upper()}")
             
-            # Delete photo AFTER sending email (if confidence is high)
+            # Handle photo based on confidence
             if confidence >= 0.70:
+                # High confidence - delete photo
                 if photo_path and os.path.exists(photo_path):
                     os.remove(photo_path)
                     print(f"  High confidence ({confidence:.2%}) - photo deleted")
                     photo_path = None
             else:
-                print(f"  Low confidence ({confidence:.2%}) - photo kept for review")
+                # Low confidence - overwrite with processed version for review
+                if photo_path and os.path.exists(photo_path):
+                    # Re-process and save the processed image to original path
+                    from predict import load_img
+                    tensor, processed_img = load_img(photo_path, preprocess)
+                    processed_img.save(photo_path)
+                    print(f"  Low confidence ({confidence:.2%}) - overwritten with processed image for review")
             
             # Wait before next check
             time.sleep(check_interval)
