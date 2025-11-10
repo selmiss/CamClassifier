@@ -122,6 +122,7 @@ def load_model():
         tuple: (model, preprocess, prototypes, device)
     """
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Using device: {device}")
     
     # Load CLIP model
     model, _, preprocess = open_clip.create_model_and_transforms(

@@ -2,10 +2,19 @@ import os
 import torch
 import torch.nn.functional as F
 from PIL import Image
+import cv2
+import numpy as np
 from src.capture_photo import capture_photo, save_photo
 
 
-def crop_box(img, left_ratio=0.0, top_ratio=0.0, right_ratio=0.5, bottom_ratio=1.0):
+# Default crop parameters used in preprocessing
+CROP_LEFT_RATIO = 0.0
+CROP_TOP_RATIO = 0.2
+CROP_RIGHT_RATIO = 0.5
+CROP_BOTTOM_RATIO = 0.95
+
+
+def crop_box(img, left_ratio=0.0, top_ratio=0.0, right_ratio=0.5, bottom_ratio=1.0, return_coords=False):
     """
     Crop a box from the image using ratio-based coordinates.
     
@@ -15,9 +24,11 @@ def crop_box(img, left_ratio=0.0, top_ratio=0.0, right_ratio=0.5, bottom_ratio=1
         top_ratio: Top boundary as ratio of height (0.0 to 1.0), default 0.0
         right_ratio: Right boundary as ratio of width (0.0 to 1.0), default 0.5 (left half)
         bottom_ratio: Bottom boundary as ratio of height (0.0 to 1.0), default 1.0
+        return_coords: If True, return (cropped_img, crop_coords) instead of just cropped_img
     
     Returns:
-        PIL Image: Cropped image
+        PIL Image: Cropped image (if return_coords=False)
+        tuple: (cropped_img, crop_coords) where crop_coords is a dict with 'left', 'top', 'right', 'bottom' (if return_coords=True)
         
     Examples:
         - Left half (default): left=0.0, right=0.5
@@ -33,12 +44,84 @@ def crop_box(img, left_ratio=0.0, top_ratio=0.0, right_ratio=0.5, bottom_ratio=1
     bottom = int(height * bottom_ratio)
     
     cropped_img = img.crop((left, top, right, bottom))
+    
+    if return_coords:
+        crop_coords = {
+            'left': left,
+            'top': top,
+            'right': right,
+            'bottom': bottom,
+            'left_ratio': left_ratio,
+            'top_ratio': top_ratio,
+            'right_ratio': right_ratio,
+            'bottom_ratio': bottom_ratio
+        }
+        return cropped_img, crop_coords
+    
     return cropped_img
+
+
+def apply_edge_detection(img, method='scharr'):
+    """
+    Apply edge detection to an image using Sobel operator with adaptive thresholding.
+    
+    Args:
+        img: PIL Image object
+        method: Edge detection method ('sobel', 'canny', or 'scharr')
+    
+    Returns:
+        PIL Image: Edge-detected image in RGB format (edges are white on black background)
+    """
+    # Convert PIL Image to numpy array
+    img_np = np.array(img)
+    
+    # Convert to grayscale for edge detection
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 1.4)
+    
+    if method == 'sobel':
+        # Compute Sobel gradients in X and Y directions
+        sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Compute gradient magnitude
+        magnitude = np.sqrt(sobelx**2 + sobely**2)
+        
+        # Normalize to 0-255 range
+        magnitude = np.uint8(255 * magnitude / np.max(magnitude))
+        
+        # Apply adaptive thresholding to get cleaner edges
+        _, edges = cv2.threshold(magnitude, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+    elif method == 'scharr':
+        # Scharr operator (more accurate than Sobel)
+        scharrx = cv2.Scharr(blurred, cv2.CV_64F, 1, 0)
+        scharry = cv2.Scharr(blurred, cv2.CV_64F, 0, 1)
+        
+        # Compute gradient magnitude
+        magnitude = np.sqrt(scharrx**2 + scharry**2)
+        
+        # Normalize to 0-255 range
+        magnitude = np.uint8(255 * magnitude / np.max(magnitude))
+        
+        # Apply adaptive thresholding
+        _, edges = cv2.threshold(magnitude, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+    else:  # canny (fallback)
+        edges = cv2.Canny(blurred, 50, 150)
+    
+    # Convert single channel edge map to 3-channel RGB (edges are white on black)
+    edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+    
+    # Convert back to PIL Image
+    return Image.fromarray(edges_rgb)
 
 
 def load_img(path_or_image, preprocess, save_processed_path=None):
     """
-    Load, normalize brightness, and preprocess a single image.
+    Load, crop, apply edge detection, and preprocess a single image.
     
     Args:
         path_or_image: Either a file path (str) or a PIL Image object
@@ -46,7 +129,7 @@ def load_img(path_or_image, preprocess, save_processed_path=None):
         save_processed_path: If provided, save processed image to this path
     
     Returns:
-        tuple: (preprocessed_tensor, original_image)
+        tuple: (preprocessed_tensor, processed_image)
     """
     # Handle both path and PIL Image input
     if isinstance(path_or_image, str):
@@ -56,9 +139,12 @@ def load_img(path_or_image, preprocess, save_processed_path=None):
     else:
         raise TypeError(f"Expected str or PIL.Image, got {type(path_or_image)}")
     
-    # Crop the image (default: left half)
-    # Adjust ratios in crop_box() call to change crop area
-    img = crop_box(img, left_ratio=0.0, top_ratio=0.2, right_ratio=0.5, bottom_ratio=0.95)
+    # Crop the image using default crop parameters
+    img = crop_box(img, left_ratio=CROP_LEFT_RATIO, top_ratio=CROP_TOP_RATIO, 
+                   right_ratio=CROP_RIGHT_RATIO, bottom_ratio=CROP_BOTTOM_RATIO)
+    
+    # Apply edge detection after cropping
+    img = apply_edge_detection(img)
     
     if save_processed_path:
         img.save(save_processed_path)

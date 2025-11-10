@@ -3,7 +3,45 @@ import statistics
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from main import load_model
-from src.predict import predict, list_images
+from src.predict import (
+    predict, list_images, crop_box,
+    CROP_LEFT_RATIO, CROP_TOP_RATIO, CROP_RIGHT_RATIO, CROP_BOTTOM_RATIO
+)
+from PIL import Image, ImageDraw
+
+
+def visualize_crop_box(image_path, output_path, left_ratio=0.0, top_ratio=0.0, right_ratio=0.5, bottom_ratio=1.0):
+    """
+    Visualize the crop box on an image and save it.
+    This function is used only for evaluation purposes.
+    
+    Args:
+        image_path: Path to the input image
+        output_path: Path to save the visualization
+        left_ratio, top_ratio, right_ratio, bottom_ratio: Crop parameters matching crop_box()
+    """
+    # Load original image
+    img = Image.open(image_path).convert("RGB")
+    
+    # Get crop coordinates using the same crop_box function
+    _, crop_coords = crop_box(img, left_ratio, top_ratio, right_ratio, bottom_ratio, return_coords=True)
+    
+    # Create a copy to draw on
+    img_with_box = img.copy()
+    draw = ImageDraw.Draw(img_with_box)
+    
+    # Draw rectangle (crop box) in red with thick lines
+    width, height = img.size
+    line_width = max(3, width // 200)  # Adaptive line width
+    draw.rectangle([
+        (crop_coords['left'], crop_coords['top']),
+        (crop_coords['right'], crop_coords['bottom'])
+    ], outline="red", width=line_width)
+    
+    # Save the visualization
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    img_with_box.save(output_path)
+    print(f"  ✓ Crop box visualization saved: {output_path}")
 
 
 def evaluate_model(test_data_dir="logs/data/test_data"):
@@ -59,7 +97,22 @@ def evaluate_model(test_data_dir="logs/data/test_data"):
     print("\nTesting POSITIVE samples (open door):")
     for i, img_path in enumerate(pos_images, 1):
         img_name = os.path.basename(img_path)
-        result = predict(img_path, model, preprocess, prototypes, device, classes)
+        
+        # For the first image, save visualizations
+        if i == 1:
+            # Visualize crop box (use same parameters as load_img preprocessing)
+            viz_output_path = os.path.join("logs", "crop_box_visualization_pos.jpg")
+            print(f"\n  Visualizing crop box for first positive image...")
+            visualize_crop_box(img_path, viz_output_path, 
+                             left_ratio=CROP_LEFT_RATIO, top_ratio=CROP_TOP_RATIO, 
+                             right_ratio=CROP_RIGHT_RATIO, bottom_ratio=CROP_BOTTOM_RATIO)
+            
+            # Save edge-detected image
+            edge_output_path = os.path.join("logs", "edge_detected_pos.jpg")
+            result = predict(img_path, model, preprocess, prototypes, device, classes, save_processed_path=edge_output_path)
+            print()
+        else:
+            result = predict(img_path, model, preprocess, prototypes, device, classes)
         
         # Combine closed and closed_dark as "closed" state
         closed_prob = result.get('closed', 0) + result.get('closed_dark', 0)
@@ -96,7 +149,22 @@ def evaluate_model(test_data_dir="logs/data/test_data"):
     print("\nTesting NEGATIVE samples (closed door):")
     for i, img_path in enumerate(neg_images, 1):
         img_name = os.path.basename(img_path)
-        result = predict(img_path, model, preprocess, prototypes, device, classes)
+        
+        # For the first image, save visualizations
+        if i == 1:
+            # Visualize crop box (use same parameters as load_img preprocessing)
+            viz_output_path = os.path.join("logs", "crop_box_visualization_neg.jpg")
+            print(f"\n  Visualizing crop box for first negative image...")
+            visualize_crop_box(img_path, viz_output_path,
+                             left_ratio=CROP_LEFT_RATIO, top_ratio=CROP_TOP_RATIO, 
+                             right_ratio=CROP_RIGHT_RATIO, bottom_ratio=CROP_BOTTOM_RATIO)
+            
+            # Save edge-detected image
+            edge_output_path = os.path.join("logs", "edge_detected_neg.jpg")
+            result = predict(img_path, model, preprocess, prototypes, device, classes, save_processed_path=edge_output_path)
+            print()
+        else:
+            result = predict(img_path, model, preprocess, prototypes, device, classes)
         
         # Combine closed and closed_dark as "closed" state
         closed_prob = result.get('closed', 0) + result.get('closed_dark', 0)
