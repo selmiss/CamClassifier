@@ -21,7 +21,7 @@ def evaluate_model(test_data_dir="logs/data/test_data"):
     print("="*60)
     
     # Load model
-    print("\n[1/3] Loading model and prototypes...")
+    print("\n[1/3] Loading model from checkpoint...")
     model, preprocess, prototypes, classes, device = load_model()
     print(f"  ✓ Model loaded successfully on device: {device}")
     print(f"  ✓ Classes: {classes}")

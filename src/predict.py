@@ -1,6 +1,5 @@
 import os
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from src.capture_photo import capture_photo, save_photo
 
@@ -58,36 +57,13 @@ def load_img(path_or_image, preprocess, save_processed_path=None):
     
     # Crop the image (default: left half)
     # Adjust ratios in crop_box() call to change crop area
-    img = crop_box(img, left_ratio=0.0, top_ratio=0.2, right_ratio=0.5, bottom_ratio=0.95)
+    # img = crop_box(img, left_ratio=0.0, top_ratio=0.2, right_ratio=0.5, bottom_ratio=0.95)
     
     if save_processed_path:
         img.save(save_processed_path)
         print(f"  Saved processed image: {save_processed_path}")
     return preprocess(img).unsqueeze(0), img
 
-
-def encode_images(paths, model, preprocess, device):
-    """
-    Encode a batch of images to feature vectors.
-    
-    Args:
-        paths: List of image paths
-        model: CLIP model
-        preprocess: Image preprocessing transform
-        device: torch device
-    
-    Returns:
-        torch.Tensor: Normalized feature vectors (N, D)
-    """
-    with torch.no_grad():
-        tensors = []
-        for p in paths:
-            tensor, _ = load_img(p, preprocess)
-            tensors.append(tensor)
-        batch = torch.cat(tensors, dim=0).to(device)
-        feats = model.encode_image(batch)
-        feats = F.normalize(feats, dim=-1)  # Normalize for cosine similarity
-    return feats
 
 
 def list_images(folder):
@@ -101,16 +77,16 @@ def list_images(folder):
 
 def predict(image, model, preprocess, prototypes, device, classes=None, temperature=100.0, save_processed_path=None):
     """
-    Predict image class using prototypical networks.
+    Predict image class using the finetuned classifier.
     
     Args:
         image: Either a file path (str) or a PIL Image object
-        model: Pre-loaded CLIP model
+        model: Pre-loaded classifier model
         preprocess: Image preprocessing transform
-        prototypes: Pre-computed class prototypes (tensor of shape [C, D])
+        prototypes: Kept for compatibility, not used
         device: torch device (cpu/cuda/mps)
         classes: List of class names (default: ["open", "closed"])
-        temperature: Temperature scaling for logits (higher = more confident)
+        temperature: Temperature scaling factor for logits
         save_processed_path: If provided, save processed image to this path
     
     Returns:
@@ -119,12 +95,13 @@ def predict(image, model, preprocess, prototypes, device, classes=None, temperat
     if classes is None:
         classes = ["open", "closed"]
     
+    # Use sensible default temperature for classifier logits
+    temp = 1.0 if temperature is None else float(temperature)
     with torch.no_grad():
-        tensor, processed_img = load_img(image, preprocess, save_processed_path)
-        feat = model.encode_image(tensor.to(device))
-        feat = F.normalize(feat, dim=-1)
-        # Cosine similarity -> logit with temperature scaling
-        logits = temperature * feat @ prototypes.T  # (1, C)
+        tensor, _ = load_img(image, preprocess, save_processed_path)
+        logits = model(tensor.to(device))
+        # Apply temperature scaling
+        logits = logits / max(temp, 1e-6)
         probs = logits.softmax(dim=-1).squeeze(0).tolist()
     
     return {cls: prob for cls, prob in zip(classes, probs)}

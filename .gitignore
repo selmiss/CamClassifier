@@ -5,6 +5,8 @@ __pycache__/
 
 pics/
 logs/
+checkpoints/
+nohup.out
 fewshot/neg/*
 fewshot/pos/*
 local.env.sh

@@ -4,9 +4,10 @@ import time
 from datetime import datetime
 import torch
 import torch.nn.functional as F
-import open_clip
+import torch.nn as nn
+from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 import cv2
-from src.predict import predict, capture_and_predict, encode_images, list_images
+from src.predict import predict, capture_and_predict
 from src.send_email import send_email_with_photo
 from src.capture_photo import save_photo
 
@@ -116,39 +117,35 @@ class RotatingLogger:
 
 def load_model():
     """
-    Load CLIP model and prepare visual prototypes from few-shot examples.
+    Load a small pretrained model and restore weights from checkpoint for inference.
     
     Returns:
-        tuple: (model, preprocess, prototypes, device)
+        tuple: (model, preprocess, prototypes, classes, device)
     """
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # Initialize pretrained backbone and preprocessing
+    weights = MobileNet_V3_Small_Weights.DEFAULT
+    preprocess = weights.transforms()
+    model = mobilenet_v3_small(weights=weights)
     
-    # Load CLIP model
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-16", pretrained="openai"
-    )
+    # Load checkpoint path from env or default
+    ckpt_path = os.getenv("CHECKPOINT_PATH", os.path.join("checkpoints", "mobilenet_v3_small_fewshot.pt"))
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found at '{ckpt_path}'. Train first with: python src/train.py")
+    ckpt = torch.load(ckpt_path, map_location=device)
+    
+    # Read classes from checkpoint (fallback to two-class order if missing)
+    classes = ckpt.get("classes", ["open", "closed"])
+    
+    # Replace classifier head to match number of classes and load weights
+    in_features = model.classifier[-1].in_features
+    model.classifier[-1] = nn.Linear(in_features, len(classes))
+    model.load_state_dict(ckpt["model_state"], strict=True)
     model = model.to(device).eval()
     
-    # Define classes (order matters!)
-    CLASSES = ["open", "closed", "closed_dark"]  # maps to pos, neg, neg_dark
-    SUPPORT_FOLDERS = ["fewshot/pos", "fewshot/neg", "fewshot/neg_dark"]  # pos=open, neg=closed, neg_dark=closed_dark
-    
-    # Compute prototypes (mean features) for each class
-    prototypes = []
-    for cls, folder in zip(CLASSES, SUPPORT_FOLDERS):
-        img_paths = list_images(folder)
-        if not img_paths:
-            raise ValueError(f"No images found in {folder}. Please add example images for '{cls}' class.")
-        
-        print(f"Loading {len(img_paths)} example(s) for class '{cls}' from {folder}")
-        feats = encode_images(img_paths, model, preprocess, device)  # (Ns, D)
-        proto = feats.mean(dim=0, keepdim=True)  # (1, D)
-        proto = F.normalize(proto, dim=-1)  # Re-normalize for stability
-        prototypes.append(proto)
-    
-    prototypes = torch.cat(prototypes, dim=0)  # (C=3, D)
-    
-    return model, preprocess, prototypes, CLASSES, device
+    # API compatibility: prototypes unused
+    prototypes = None
+    return model, preprocess, prototypes, classes, device
 
 
 def main():
@@ -182,7 +179,7 @@ def main():
     logger.log(f"Classes: {classes}")
     
     # Monitoring loop configuration
-    check_interval = 5  # seconds between checks
+    check_interval = 30  # seconds between checks
     model_reload_interval = 3600  # seconds (1 hour)
     start_time = time.time()
     last_model_load_time = time.time()
@@ -308,7 +305,7 @@ Photo attached.
                 logger.log(f"  State unchanged: {current_state.upper()}")
             
             # Handle photo based on confidence
-            if confidence >= 0.70:
+            if confidence >= 0.6:
                 # High confidence - delete saved photo if it exists
                 if photo_path and os.path.exists(photo_path):
                     os.remove(photo_path)
