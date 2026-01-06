@@ -23,6 +23,50 @@ def build_model(num_classes: int) -> Tuple[nn.Module, object]:
     return model, preprocess
 
 
+def load_model_from_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[nn.Module, object, List[str]]:
+    """
+    Load a model from a saved checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        device: torch device to load the model onto
+    
+    Returns:
+        tuple: (model, preprocess, classes) where:
+            - model: Loaded model with weights restored
+            - preprocess: Image preprocessing transforms
+            - classes: List of class names from checkpoint
+    """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found at '{checkpoint_path}'")
+    
+    print(f"Loading model from checkpoint: {checkpoint_path}")
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    
+    # Get classes from checkpoint (fallback to default if missing)
+    classes = ckpt.get("classes", ["open", "closed"])
+    print(f"  Classes from checkpoint: {classes}")
+    
+    # Build model architecture
+    weights = MobileNet_V3_Small_Weights.DEFAULT
+    preprocess = weights.transforms()
+    model = mobilenet_v3_small(weights=weights)
+    
+    # Replace classifier head to match checkpoint
+    in_features = model.classifier[-1].in_features
+    model.classifier[-1] = nn.Linear(in_features, len(classes))
+    
+    # Load saved weights
+    model.load_state_dict(ckpt["model_state"], strict=True)
+    print(f"  ✓ Model weights loaded successfully")
+    
+    # Print checkpoint info if available
+    if "test_accuracy" in ckpt:
+        print(f"  Checkpoint test accuracy: {ckpt['test_accuracy']:.2%}")
+    
+    return model, preprocess, classes
+
+
 class FewShotDataset(Dataset):
     def __init__(self, items: List[Tuple[str, int]], transform):
         self.items = items
@@ -101,15 +145,17 @@ def main():
     parser = argparse.ArgumentParser(description="Few-shot fine-tuning for door state classifier")
     parser.add_argument("--fewshot_dir", type=str, default="logs/data/training_data",
                         help="Root dir containing pos/, neg/, neg_dark/ (use '@test_data' to map to logs/data/test_data)")
-    parser.add_argument("--epochs", type=int, default=20, help="Epochs for fine-tuning")
+    parser.add_argument("--epochs", type=int, default=30, help="Epochs for fine-tuning")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
-    parser.add_argument("--lr", type=float, default=5e-2, help="Learning rate for head (backbone uses lr/10)")
-    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for head (backbone uses lr/10)")
+    parser.add_argument("--weight_decay", type=float, default=0, help="Weight decay")
     parser.add_argument("--test_split", type=float, default=0, help="Ratio of data for test set (default 0.3)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for train/test split")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Where to save checkpoint")
     parser.add_argument("--checkpoint_name", type=str, default="mobilenet_v3_small_11_11_2025.pt",
                         help="Checkpoint file name")
+    parser.add_argument("--load_checkpoint", type=str, default="checkpoints/mobilenet_v3_small_11_11_2025.pt",
+                        help="Path to checkpoint to load and continue training from (optional)")
     args = parser.parse_args()
 
     # Set random seed
@@ -161,7 +207,22 @@ def main():
         test_counts[idx] = len(test_paths)
 
     # Build model and dataloaders
-    model, preprocess = build_model(num_classes=len(classes))
+    if args.load_checkpoint:
+        print(f"\n{'='*60}")
+        print(f"LOADING FROM CHECKPOINT")
+        print(f"{'='*60}")
+        model, preprocess, checkpoint_classes = load_model_from_checkpoint(args.load_checkpoint, device)
+        # Verify classes match
+        if checkpoint_classes != classes:
+            print(f"  Warning: Checkpoint classes {checkpoint_classes} differ from expected {classes}")
+            print(f"  Using checkpoint classes: {checkpoint_classes}")
+            classes = checkpoint_classes
+        print(f"{'='*60}\n")
+    else:
+        print(f"\nBuilding new model from ImageNet weights...")
+        model, preprocess = build_model(num_classes=len(classes))
+        print(f"  ✓ Model initialized\n")
+    
     train_dataset = FewShotDataset(train_samples, preprocess)
     test_dataset = FewShotDataset(train_samples, preprocess)  # Use same samples as training
     

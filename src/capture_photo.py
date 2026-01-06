@@ -45,7 +45,6 @@ def capture_photo(camera=None):
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     photo = Image.fromarray(frame_rgb)
     
-    print("Photo captured successfully")
     return photo
 
 

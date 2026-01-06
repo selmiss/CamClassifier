@@ -75,7 +75,7 @@ def list_images(folder):
             if os.path.splitext(f.lower())[1] in exts]
 
 
-def predict(image, model, preprocess, prototypes, device, classes=None, temperature=100.0, save_processed_path=None):
+def predict(image, model, preprocess, prototypes, device, classes=None, temperature=100.0, save_processed_path=None, return_logits=False):
     """
     Predict image class using the finetuned classifier.
     
@@ -88,9 +88,10 @@ def predict(image, model, preprocess, prototypes, device, classes=None, temperat
         classes: List of class names (default: ["open", "closed"])
         temperature: Temperature scaling factor for logits
         save_processed_path: If provided, save processed image to this path
+        return_logits: If True, return logits tensor instead of probabilities
     
     Returns:
-        dict: Probabilities for each class
+        dict: Probabilities for each class (or logits if return_logits=True)
     """
     if classes is None:
         classes = ["open", "closed"]
@@ -102,6 +103,10 @@ def predict(image, model, preprocess, prototypes, device, classes=None, temperat
         logits = model(tensor.to(device))
         # Apply temperature scaling
         logits = logits / max(temp, 1e-6)
+        
+        if return_logits:
+            return logits.squeeze(0)
+        
         probs = logits.softmax(dim=-1).squeeze(0).tolist()
     
     return {cls: prob for cls, prob in zip(classes, probs)}
@@ -141,3 +146,85 @@ def capture_and_predict(model, preprocess, prototypes, device, classes=None, sav
         save_photo(photo)
     
     return result, photo
+
+
+def multi_sample_predict(model, preprocess, prototypes, device, classes=None, camera=None, num_samples=30, sample_duration=10.0):
+    """
+    Capture multiple photos and average the logits for more accurate prediction.
+    
+    Args:
+        model: Pre-loaded classifier model
+        preprocess: Image preprocessing transform
+        prototypes: Kept for compatibility, not used
+        device: torch device (cpu/cuda/mps)
+        classes: List of class names (default: ["open", "closed"])
+        camera: cv2.VideoCapture object
+        num_samples: Number of photos to take (default: 10)
+        sample_duration: Total duration in seconds to take all samples (default: 5.0)
+    
+    Returns:
+        tuple: (result_dict, photo, sample_results) where:
+               - result_dict contains averaged probabilities
+               - photo is the middle sample photo
+               - sample_results is a list of individual sample predictions
+               Returns (None, None, None) if capture failed
+    """
+    import time
+    
+    if classes is None:
+        classes = ["open", "closed"]
+    
+    # Calculate interval between samples
+    interval = sample_duration / max(num_samples - 1, 1) if num_samples > 1 else 0
+    
+    accumulated_logits = None
+    sample_results = []
+    photos = []
+    successful_samples = 0
+    
+    for i in range(num_samples):
+        # Capture photo
+        photo = capture_photo(camera)
+        
+        if not photo:
+            print(f"  Sample {i+1}/{num_samples}: Failed to capture")
+            continue
+        
+        photos.append(photo)
+        
+        # Get logits for this sample
+        logits = predict(photo, model, preprocess, prototypes, device, classes, return_logits=True)
+        
+        # Accumulate logits
+        if accumulated_logits is None:
+            accumulated_logits = logits.clone()
+        else:
+            accumulated_logits += logits
+        
+        # Also compute probabilities for this individual sample for logging
+        sample_probs = logits.softmax(dim=-1).tolist()
+        sample_result = {cls: prob for cls, prob in zip(classes, sample_probs)}
+        sample_results.append(sample_result)
+        
+        successful_samples += 1
+        
+        # Wait before next sample (except for the last one)
+        if i < num_samples - 1:
+            time.sleep(interval)
+    
+    if successful_samples == 0:
+        print("  Failed to capture any samples")
+        return None, None, None
+    
+    # Average the accumulated logits
+    avg_logits = accumulated_logits / successful_samples
+    
+    # Compute final probabilities from averaged logits
+    avg_probs = avg_logits.softmax(dim=-1).tolist()
+    result = {cls: prob for cls, prob in zip(classes, avg_probs)}
+    
+    # Return the middle photo (or last if we have fewer samples)
+    middle_idx = len(photos) // 2
+    representative_photo = photos[middle_idx] if photos else None
+    
+    return result, representative_photo, sample_results

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 import cv2
-from src.predict import predict, capture_and_predict
+from src.predict import predict, capture_and_predict, multi_sample_predict
 from src.send_email import send_email_with_photo
 from src.capture_photo import save_photo
 
@@ -129,7 +129,7 @@ def load_model():
     model = mobilenet_v3_small(weights=weights)
     
     # Load checkpoint path from env or default
-    ckpt_path = os.getenv("CHECKPOINT_PATH", os.path.join("checkpoints", "mobilenet_v3_small_fewshot.pt"))
+    ckpt_path = os.getenv("CHECKPOINT_PATH", os.path.join("checkpoints", "mobilenet_v3_small_11_11_2025.pt"))
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found at '{ckpt_path}'. Train first with: python src/train.py")
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -179,7 +179,7 @@ def main():
     logger.log(f"Classes: {classes}")
     
     # Monitoring loop configuration
-    check_interval = 30  # seconds between checks
+    check_interval = 1  # seconds between checks
     model_reload_interval = 3600  # seconds (1 hour)
     start_time = time.time()
     last_model_load_time = time.time()
@@ -230,21 +230,32 @@ def main():
                 time.sleep(check_interval)
                 continue
             
-            # Capture and predict (photo is in memory, not saved yet)
-            result, photo = capture_and_predict(model, preprocess, prototypes, device, classes, camera=camera)
+            # Multi-sample prediction for higher accuracy
+            logger.log("  📷 Starting multi-sample prediction (30 samples over 10 seconds)...")
+            result, photo, sample_results = multi_sample_predict(
+                model, preprocess, prototypes, device, classes, 
+                camera=camera, num_samples=10, sample_duration=5
+            )
             
             if not result:
-                logger.log("Failed to capture or predict, skipping...")
+                logger.log("  ✗ Failed to capture or predict, skipping...")
                 time.sleep(check_interval)
                 continue
             
-            # Determine current door state
+            # Log individual sample results
+            logger.log(f"  Individual samples ({len(sample_results)} successful):")
+            for i, sample_result in enumerate(sample_results, 1):
+                sample_prob_str = " | ".join([f"{cls.capitalize()}: {sample_result[cls]:.2%}" for cls in classes])
+                logger.log(f"    Sample {i:2d}: {sample_prob_str}")
+            
+            # Determine current door state from averaged result
             # Combine closed and closed_dark as "closed" state
             closed_total = result['closed'] + result.get('closed_dark', 0)
             new_state = "open" if result['open'] > closed_total else "closed"
             confidence = result['open'] if new_state == "open" else closed_total
             
-            logger.log(f"  State: {new_state.upper()} (confidence: {confidence:.2%})")
+            logger.log_raw("")
+            logger.log(f"  📊 AVERAGED RESULT - State: {new_state.upper()} (confidence: {confidence:.2%})")
             prob_str = " | ".join([f"{cls.capitalize()}: {result[cls]:.2%}" for cls in classes])
             logger.log(f"  {prob_str}")
             
@@ -268,7 +279,8 @@ def main():
                 photo_path = save_photo(photo)
                 logger.log(f"  Photo saved for state change alert: {photo_path}")
                 
-                if email_enabled:
+                # Only send email if confidence is greater than 55%
+                if email_enabled and confidence > 0.50:
                     subject = f"Door Message: {new_state.upper()} Detected"
                     body = f"""Door state change detected!
 
@@ -296,6 +308,8 @@ Photo attached.
                         logger.log("  ✓ Email sent successfully!")
                     else:
                         logger.log("  ✗ Failed to send email")
+                elif email_enabled:
+                    logger.log(f"  Confidence too low ({confidence:.2%} ≤ 55%) - email not sent")
                 else:
                     logger.log("  (Email alerts disabled)")
                 
@@ -305,7 +319,7 @@ Photo attached.
                 logger.log(f"  State unchanged: {current_state.upper()}")
             
             # Handle photo based on confidence
-            if confidence >= 0.6:
+            if confidence >= 0.505:
                 # High confidence - delete saved photo if it exists
                 if photo_path and os.path.exists(photo_path):
                     os.remove(photo_path)
