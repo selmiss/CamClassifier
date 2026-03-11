@@ -10,6 +10,7 @@ import cv2
 from src.predict import predict, capture_and_predict, multi_sample_predict
 from src.send_email import send_email_with_photo
 from src.capture_photo import save_photo
+from src.camera_index import get_webcam_index
 
 
 class RotatingLogger:
@@ -179,7 +180,7 @@ def main():
     logger.log(f"Classes: {classes}")
     
     # Monitoring loop configuration
-    check_interval = 1  # seconds between checks
+    check_interval = 1800  # seconds between checks
     model_reload_interval = 3600  # seconds (1 hour)
     start_time = time.time()
     last_model_load_time = time.time()
@@ -191,17 +192,10 @@ def main():
     logger.log("Press Ctrl+C to stop")
     logger.log_raw("="*50)
     
-    # Open camera once at the beginning
-    camera = cv2.VideoCapture(0)
-    if not camera.isOpened():
-        logger.log("Error: Could not open camera")
-        logger.close()
-        return
-    
-    # Give the camera a moment to initialize
-    time.sleep(0.5)
-    logger.log("Camera initialized successfully")
-    logger.log_raw("")
+    # Camera is opened at the start of each check and released after capture,
+    # so we never hold it across the long sleep (avoids driver/OS closing stream after idle).
+    # Web camera index is auto-detected by name each time (index can change).
+    camera = None
     
     try:
         while True:
@@ -230,12 +224,30 @@ def main():
                 time.sleep(check_interval)
                 continue
             
+            # Open camera for this check (fresh handle each time; avoids stale stream after long idle)
+            # Auto-detect web camera index by name so we use the right device even if order changes
+            camera_index = get_webcam_index(log_fn=logger.log)
+            if camera is not None and camera.isOpened():
+                camera.release()
+            camera = cv2.VideoCapture(camera_index)
+            if not camera.isOpened():
+                logger.log(f"Error: Could not open camera (index {camera_index})")
+                time.sleep(check_interval)
+                continue
+            logger.log(f"  Camera opened (index {camera_index})")
+            time.sleep(0.5)
+            
             # Multi-sample prediction for higher accuracy
             logger.log("  📷 Starting multi-sample prediction (30 samples over 10 seconds)...")
             result, photo, sample_results = multi_sample_predict(
                 model, preprocess, prototypes, device, classes, 
                 camera=camera, num_samples=10, sample_duration=5
             )
+            
+            # Release camera as soon as capture is done (don't hold across sleep)
+            if camera is not None and camera.isOpened():
+                camera.release()
+                camera = None
             
             if not result:
                 logger.log("  ✗ Failed to capture or predict, skipping...")

@@ -11,6 +11,7 @@ fewshot/neg/*
 fewshot/pos/*
 local.env.sh
 logs/*
+bak/*
 run.sh
 # C extensions
 *.so
